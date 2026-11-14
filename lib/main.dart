@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:io';
@@ -1651,6 +1652,80 @@ class _HomePageState extends State<HomePage> {
   List<Map<String, dynamic>> stockRecords = [];
   List<Map<String, dynamic>> stockIssues = [];
 
+  // Realtime Firestore listeners for the signed-in school Principal.
+  // Local SharedPreferences remains the offline cache.
+  final Map<String, StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>> _cloudSubscriptions = {};
+  bool _applyingCloudSnapshot = false;
+
+  @override
+  void dispose() {
+    for (final subscription in _cloudSubscriptions.values) {
+      subscription.cancel();
+    }
+    _cloudSubscriptions.clear();
+    super.dispose();
+  }
+
+  void _startCloudRealtimeSync(String schoolId) {
+    if (schoolId.isEmpty || FirebaseAuth.instance.currentUser == null) return;
+    const modules = <String, String>{
+      'students': 'academy_students',
+      'fees': 'academy_fees',
+      'attendance': 'academy_attendance',
+      'marks': 'academy_marks',
+      'transport': 'academy_transport',
+      'salaries': 'academy_salaries',
+      'expenses': 'academy_expenses',
+      'notices': 'academy_notices',
+      'syllabus': 'academy_syllabus',
+      'dateSheet': 'academy_date_sheet',
+      'stock': 'academy_stock_items',
+      'stockIssues': 'academy_stock_issues',
+    };
+    final cloud = FirebaseFirestore.instance
+        .collection('schools').doc(schoolId).collection('appData');
+    for (final entry in modules.entries) {
+      if (_cloudSubscriptions.containsKey(entry.key)) continue;
+      _cloudSubscriptions[entry.key] = cloud.doc(entry.key).snapshots().listen(
+        (snapshot) async {
+          if (!snapshot.exists || !mounted || _applyingCloudSnapshot) return;
+          final raw = snapshot.data()?['records'];
+          if (raw is! List) return;
+          final records = raw
+              .whereType<Map>()
+              .map((item) => Map<String, dynamic>.from(item))
+              .toList();
+          _applyingCloudSnapshot = true;
+          try {
+            await writeData(entry.value, records);
+            if (!mounted) return;
+            setState(() {
+              switch (entry.key) {
+                case 'students': students = records; break;
+                case 'fees': fees = records; break;
+                case 'attendance': attendance = records; break;
+                case 'marks': marks = records; break;
+                case 'transport': transport = records; break;
+                case 'salaries': salaries = records; break;
+                case 'expenses': expenses = records; break;
+                case 'notices': notices = records; break;
+                case 'syllabus': syllabusItems = records; break;
+                case 'dateSheet': dateSheetItems = records; break;
+                case 'stock': stockRecords = records; break;
+                case 'stockIssues': stockIssues = records; break;
+              }
+            });
+          } catch (e) {
+            debugPrint('Realtime cloud update failed for ${entry.key}: $e');
+          } finally {
+            _applyingCloudSnapshot = false;
+          }
+        },
+        onError: (Object error) => debugPrint('Realtime sync ${entry.key}: $error'),
+      );
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1739,6 +1814,8 @@ class _HomePageState extends State<HomePage> {
       stockRecords = stk;
       stockIssues = iss;
     });
+    // Keep other signed-in devices updated while this dashboard is open.
+    _startCloudRealtimeSync(schoolId);
   }
 
   Future<void> saveAll() async {
